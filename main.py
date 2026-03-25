@@ -1,6 +1,6 @@
 import asyncio
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
@@ -54,7 +54,7 @@ INSTANCES = [
 
 ERROR_KEYWORDS = ["shutdown", "blocked", "Forbidden", "<!DOCTYPE", "<html", "Rate limit", "temporarily unavailable", "maintenance"]
 
-async def fetch_instance(client: httpx.AsyncClient, instance: str, video_id: str) -> dict | None:
+async def fetch_instance(client: httpx.AsyncClient, instance: str, video_id: str) -> tuple[str, dict] | None:
     try:
         url = f"{instance}/api/v1/videos/{video_id}?hl=ja"
         r = await client.get(url, timeout=4.0)
@@ -66,15 +66,17 @@ async def fetch_instance(client: httpx.AsyncClient, instance: str, video_id: str
         data = r.json()
         if not data.get("title"):
             return None
-        return data
+        return (instance, data)
     except Exception:
         return None
 
-async def race_instances(video_id: str) -> dict | None:
+async def race_instances(video_id: str, exclude: str | None = None) -> tuple[str, dict] | None:
+    exclude_set = {u.strip().rstrip("/") for u in exclude.split(",") if u.strip()} if exclude else set()
+    targets = [inst for inst in INSTANCES if inst.rstrip("/") not in exclude_set]
     async with httpx.AsyncClient() as client:
         tasks = [
             asyncio.create_task(fetch_instance(client, inst, video_id))
-            for inst in INSTANCES
+            for inst in targets
         ]
         try:
             for coro in asyncio.as_completed(tasks):
@@ -92,8 +94,13 @@ def root():
     return {"status": "ok", "instances": len(INSTANCES)}
 
 @app.get("/api/v1/videos/{video_id}")
-async def get_video(video_id: str):
-    data = await race_instances(video_id)
-    if data is None:
+async def get_video(
+    video_id: str,
+    exclude: str | None = Query(default=None, description="除外するInvidiousインスタンスのURL"),
+):
+    result = await race_instances(video_id, exclude=exclude)
+    if result is None:
         raise HTTPException(status_code=503, detail="All instances failed")
+    instance_url, data = result
+    data["_instance"] = instance_url
     return data
